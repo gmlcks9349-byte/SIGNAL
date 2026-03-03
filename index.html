@@ -1048,22 +1048,50 @@ STRICT RULES:
     addLog('▶ GEMINI — 관찰 데이터 추출 중...', 'processing');
     setProgress(40);
 
-    const resp = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models/gemini-3-flash-preview:generateContent?key=${geminiKey}`,
-      {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          system_instruction: { parts: [{ text: systemInstruction }] },
-          contents: [{ role: 'user', parts }],
-          generationConfig: { temperature: 0.2, maxOutputTokens: 2048 }
-        })
+    const geminiRequestBody = JSON.stringify({
+      system_instruction: { parts: [{ text: systemInstruction }] },
+      contents: [{ role: 'user', parts }],
+      generationConfig: { temperature: 0.2, maxOutputTokens: 2048 }
+    });
+
+    const MAX_RETRIES = 3;
+    const RETRY_DELAYS = [3000, 6000, 12000];
+    let lastError = null;
+    let data = null;
+
+    for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+      if (attempt > 0) {
+        const waitSec = RETRY_DELAYS[attempt - 1] / 1000;
+        addLog(`▶ 재시도 중 (${attempt}/${MAX_RETRIES})... ${waitSec}초 대기`, 'processing');
+        await new Promise(r => setTimeout(r, RETRY_DELAYS[attempt - 1]));
       }
-    );
 
-    if (!resp.ok) { const e = await resp.json().catch(()=>({})); throw new Error('Gemini 실패: ' + (e.error?.message || resp.status)); }
+      const resp = await fetch(
+        `https://generativelanguage.googleapis.com/v1beta/models/gemini-3-flash-preview:generateContent?key=${geminiKey}`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: geminiRequestBody
+        }
+      );
 
-    const data = await resp.json();
+      if (resp.ok) {
+        data = await resp.json();
+        lastError = null;
+        break;
+      }
+
+      const e = await resp.json().catch(() => ({}));
+      const errMsg = e.error?.message || String(resp.status);
+      lastError = 'Gemini 실패: ' + errMsg;
+
+      const isRetryable = resp.status === 429 || resp.status === 503 || errMsg.includes('high demand') || errMsg.includes('overloaded');
+      if (!isRetryable || attempt === MAX_RETRIES) {
+        throw new Error(lastError);
+      }
+      addLog(`▷ Gemini 과부하 감지 — 잠시 후 재시도합니다.`, 'processing');
+    }
+
     geminiRawResult = data?.candidates?.[0]?.content?.parts?.[0]?.text;
     if (!geminiRawResult) throw new Error('Gemini 응답이 비어 있습니다.');
 
